@@ -213,6 +213,8 @@ def convert_lightgbm(
     without_onnx_ml=False,
     zipmap=True,
     split=None,
+    decision_path=False,
+    decision_leaf=False
 ):
     if targeted_onnx is not None:
         warnings.warn(
@@ -237,6 +239,8 @@ def convert_lightgbm(
         without_onnx_ml,
         zipmap=zipmap,
         split=split,
+        decision_path=decision_path,
+        decision_leaf=decision_leaf
     )
 
 

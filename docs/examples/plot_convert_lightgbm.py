@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+print('start')
+
 """
 .. _l-example-lightgbm:
 
@@ -45,7 +47,7 @@ print(clr)
 # +++++++++++++++++++++++++
 
 initial_type = [("float_input", FloatTensorType([None, 4]))]
-onx = convert_lightgbm(clr, initial_types=initial_type)
+onx = convert_lightgbm(clr, initial_types=initial_type, decision_path=True, decision_leaf=True)
 
 ###################################
 # Compute the predictions with onnxruntime
@@ -71,7 +73,7 @@ param = {"objective": "multiclass", "num_class": 3}
 bst = train_lgbm(param, dtrain, 10)
 
 initial_type = [("float_input", FloatTensorType([None, 4]))]
-onx = convert_lightgbm(bst, initial_types=initial_type)
+onx = convert_lightgbm(bst, initial_types=initial_type, decision_path=True, decision_leaf=True)
 
 sess = rt.InferenceSession(onx.SerializeToString(), providers=["CPUExecutionProvider"])
 input_name = sess.get_inputs()[0].name

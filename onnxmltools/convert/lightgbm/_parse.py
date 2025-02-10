@@ -10,6 +10,8 @@ from ..common.data_types import (
     DictionaryType,
     StringType,
     Int64Type,
+    StringTensorType,
+    Int64TensorType
 )
 
 from lightgbm import LGBMClassifier, LGBMRegressor
@@ -100,7 +102,7 @@ def _get_lightgbm_operator_name(model):
     return lightgbm_operator_name_map[model_type]
 
 
-def _parse_lightgbm_simple_model(scope, model, inputs, split=None):
+def _parse_lightgbm_simple_model(scope, model, inputs, split=None, decision_path=False, decision_leaf=False):
     """
     This function handles all non-pipeline models.
 
@@ -114,6 +116,8 @@ def _parse_lightgbm_simple_model(scope, model, inputs, split=None):
     operator_name = _get_lightgbm_operator_name(model)
     this_operator = scope.declare_local_operator(operator_name, model)
     this_operator.split = split
+    this_operator.decision_path = decision_path
+    this_operator.decision_leaf = decision_leaf
     this_operator.inputs = inputs
 
     if operator_name == "LgbmClassifier":
@@ -131,11 +135,26 @@ def _parse_lightgbm_simple_model(scope, model, inputs, split=None):
         # We assume that all scikit-learn operator can only produce a single float tensor.
         variable = scope.declare_local_variable("variable", FloatTensorType())
         this_operator.outputs.append(variable)
+    
+    # when decision_path option is passed, add its operator output (string tensor)
+    # each item is a string of 0 and 1 indicating the path through each tree
+    if decision_path:
+        dec_path = scope.declare_local_variable(
+            'decision_path', StringTensorType())
+        this_operator.outputs.append(dec_path)
+        
+    # when decision_leaf option is passed, add its operator output (int64 tensor)
+    # each item represents the leaf node where the tree was solved
+    if decision_leaf:
+        dec_leaf = scope.declare_local_variable(
+            'decision_leaf', Int64TensorType())
+        this_operator.outputs.append(dec_leaf)
+
     return this_operator.outputs
 
 
-def _parse_sklearn_classifier(scope, model, inputs, zipmap=True):
-    probability_tensor = _parse_lightgbm_simple_model(scope, model, inputs)
+def _parse_sklearn_classifier(scope, model, inputs, zipmap=True, decision_path=False, decision_leaf=False):
+    probability_tensor = _parse_lightgbm_simple_model(scope, model, inputs, decision_path=decision_path, decision_leaf=decision_leaf)
     this_operator = scope.declare_local_operator("LgbmZipMap")
     this_operator.inputs = probability_tensor
     this_operator.zipmap = zipmap
@@ -180,7 +199,7 @@ def _parse_sklearn_classifier(scope, model, inputs, zipmap=True):
     return this_operator.outputs
 
 
-def _parse_lightgbm(scope, model, inputs, zipmap=True, split=None):
+def _parse_lightgbm(scope, model, inputs, zipmap=True, split=None, decision_path=False, decision_leaf=False):
     """
     This is a delegate function. It doesn't nothing but
     invoke the correct parsing function according to the input
@@ -195,10 +214,10 @@ def _parse_lightgbm(scope, model, inputs, zipmap=True, split=None):
     :return: The output variables produced by the input model
     """
     if isinstance(model, LGBMClassifier):
-        return _parse_sklearn_classifier(scope, model, inputs, zipmap=zipmap)
+        return _parse_sklearn_classifier(scope, model, inputs, zipmap=zipmap, decision_path=decision_path, decision_leaf=decision_leaf)
     if isinstance(model, WrappedBooster) and model.operator_name == "LgbmClassifier":
-        return _parse_sklearn_classifier(scope, model, inputs, zipmap=zipmap)
-    return _parse_lightgbm_simple_model(scope, model, inputs, split=split)
+        return _parse_sklearn_classifier(scope, model, inputs, zipmap=zipmap, decision_path=decision_path, decision_leaf=decision_leaf)
+    return _parse_lightgbm_simple_model(scope, model, inputs, split=split, decision_path=decision_path, decision_leaf=decision_leaf)
 
 
 def parse_lightgbm(
@@ -209,6 +228,8 @@ def parse_lightgbm(
     custom_shape_calculators=None,
     zipmap=True,
     split=None,
+    decision_path=False,
+    decision_leaf=False
 ):
     raw_model_container = LightGbmModelContainer(model)
     topology = Topology(
@@ -220,7 +241,6 @@ def parse_lightgbm(
         custom_shape_calculators=custom_shape_calculators,
     )
     scope = topology.declare_scope("__root__")
-
     inputs = []
     for var_name, initial_type in initial_types:
         inputs.append(scope.declare_local_variable(var_name, initial_type))
@@ -228,7 +248,14 @@ def parse_lightgbm(
     for variable in inputs:
         raw_model_container.add_input(variable)
 
-    outputs = _parse_lightgbm(scope, model, inputs, zipmap=zipmap, split=split)
+    outputs = _parse_lightgbm(
+        scope,
+        model,
+        inputs,
+        zipmap=zipmap,
+        split=split,
+        decision_path=decision_path,
+        decision_leaf=decision_leaf)
 
     for variable in outputs:
         raw_model_container.add_output(variable)

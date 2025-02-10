@@ -15,9 +15,24 @@ from ...common._apply_operation import (
     apply_identity,
 )
 from ...common._registration import register_converter
+from ...common.data_types import (
+    Int64TensorType,
+    Int32TensorType,
+    BooleanTensorType,
+    FloatTensorType,
+    StringTensorType,
+    DoubleTensorType
+)
 from ...common.tree_ensemble import get_default_tree_classifier_attribute_pairs
 from ....proto import onnx_proto
-
+try:
+    from onnxconverter_common.data_types import (
+        Complex64TensorType,
+        Complex128TensorType,
+    )
+except ImportError:
+    Complex64TensorType = None
+    Complex128TensorType = None
 
 def has_tqdm():
     try:
@@ -533,6 +548,145 @@ def _split_tree_ensemble_atts(attrs, split):
 
     return results
 
+def _append_decision_output(
+        input_name,
+        attrs,
+        fct_label,
+        n_out,
+        scope,
+        operator,
+        container,
+        op_version=2,
+        cast_encode=False,
+        regression=False,
+        dtype=np.float32,
+        overwrite_tree=None):
+
+    attrs = attrs.copy()
+    attrs['name'] = scope.get_unique_operator_name('TreeEnsembleClassifier')
+    attrs['n_targets'] = 1
+    attrs['post_transform'] = 'NONE'
+    if regression:
+        attrs['target_weights'] = np.array(
+            [float(_) for _ in attrs['target_nodeids']], dtype=dtype)
+    else:
+        attrs['target_ids'] = [0 for _ in attrs['class_ids']]
+        attrs['target_weights'] = [float(_) for _ in attrs['class_nodeids']]
+        attrs['target_nodeids'] = attrs['class_nodeids']
+        attrs['target_treeids'] = attrs['class_treeids']
+
+    rem = [k for k in attrs if k.startswith('class')]
+    for k in rem:
+        del attrs[k]
+    dpath = scope.get_unique_variable_name("dpath")
+    container.add_node(
+        'TreeEnsembleRegressor', input_name, dpath,
+        op_domain='ai.onnx.ml', op_version=op_version, **attrs)
+
+    if n_out is None:
+        final_name = scope.get_unique_variable_name("dpatho")
+    else:
+        final_name = operator.outputs[n_out].full_name
+
+    if cast_encode:
+        apply_cast(
+            scope, dpath, final_name,
+            container, to=onnx_proto.TensorProto.INT64,
+            operator_name=scope.get_unique_operator_name('TreePathType'))
+    else:
+        effective_tree = overwrite_tree if overwrite_tree is not None else (
+            operator.original_operator.booster_.trees_to_dataframe()
+        )
+        
+        labels = fct_label(effective_tree)
+        ordered = list(sorted(labels.items()))
+        keys = [float(_[0]) for _ in ordered]
+        values = [_[1] for _ in ordered]
+        name = scope.get_unique_variable_name("spath")
+        container.add_node(
+            'LabelEncoder', dpath, name,
+            op_domain='ai.onnx.ml', op_version=2,
+            default_string='0', keys_floats=keys, values_strings=values,
+            name=scope.get_unique_operator_name('TreePath'))
+        apply_reshape(
+            scope, name, final_name,
+            container, desired_shape=(-1, 1),
+            operator_name=scope.get_unique_operator_name('TreePathShape'))
+
+    return final_name
+
+def _recursive_build_labels(tree, index, current):
+    current[index] = True
+    if 'L' in tree.at[index, 'left_child']:
+        yield (index, current.copy())
+    else:
+        for it in _recursive_build_labels(
+                tree, int(tree.at[index, 'left_child'].split('-')[1].replace('L', '').replace('S', '')), current):
+            yield it
+        for it in _recursive_build_labels(
+                tree, int(tree.at[index, 'right_child'].split('-')[1].replace('L', '').replace('S', '')), current):
+            yield it
+    current[index] = False
+
+def _build_labels_path(tree):
+    paths = {}
+    current = {}
+
+    for leaf_idex, path in _recursive_build_labels(tree, 0, current):
+        spath = ["0" for _ in range(len(tree.index))]
+        for nodeid, b in path.items():
+            if b:
+                spath[nodeid] = "1"
+        paths[leaf_idex] = ''.join(spath)
+    return paths
+
+def _build_labels_leaf(tree):
+    paths = {}
+    current = {}
+
+    for leaf_idex, path in _recursive_build_labels(tree, 0, current):
+        paths[leaf_idex] = leaf_idex
+    return paths
+
+def guess_numpy_type(data_type):
+    """
+    Guess the corresponding numpy type based on data_type.
+    """
+    if data_type in (
+        np.float64,
+        np.float32,
+        np.int8,
+        np.uint8,
+        np.str_,
+        np.bool_,
+        np.int32,
+        np.int64,
+    ):
+        return data_type
+    if data_type == str:  # noqa: E721
+        return np.str_
+    if data_type == bool:  # noqa: E721
+        return np.bool_
+    if isinstance(data_type, FloatTensorType):
+        return np.float32
+    if isinstance(data_type, DoubleTensorType):
+        return np.float64
+    if isinstance(data_type, Int32TensorType):
+        return np.int32
+    if isinstance(data_type, Int64TensorType):
+        return np.int64
+    if isinstance(data_type, StringTensorType):
+        return np.str_
+    if isinstance(data_type, BooleanTensorType):
+        return np.bool_
+    if Complex64TensorType is not None:
+        if data_type in (np.complex64, np.complex128):
+            return data_type
+        if isinstance(data_type, Complex64TensorType):
+            return np.complex64
+        if isinstance(data_type, Complex128TensorType):
+            return np.complex128
+    raise NotImplementedError("Unsupported data_type '{}'.".format(data_type))
 
 def convert_lightgbm(scope, operator, container):
     """
@@ -607,10 +761,16 @@ def convert_lightgbm(scope, operator, container):
             ]
             attrs[k] = sorted_list
 
+    try:
+        dtype = guess_numpy_type(operator.inputs[0].type)
+    except NotImplementedError as e:
+        raise RuntimeError(
+            "Unknown variable {}.".format(operator.inputs[0])) from e
+    if dtype != np.float64:
+        dtype = np.float32
+
     # Create ONNX object
-    if gbm_text["objective"].startswith("binary") or gbm_text["objective"].startswith(
-        "multiclass"
-    ):
+    if gbm_text["objective"].startswith("binary") or gbm_text["objective"].startswith("multiclass"):
         # Prepare label information for both of TreeEnsembleClassifier
         class_type = onnx_proto.TensorProto.STRING
         if all(
@@ -740,6 +900,34 @@ def convert_lightgbm(scope, operator, container):
         # Convert probability tensor to probability map
         # (keys are labels while values are the associated probabilities)
         container.add_node("Identity", prob_tensor, operator.outputs[1].full_name)
+
+        n_out = 2
+        if getattr(operator, "decision_path", False):
+            # decision_path
+            _append_decision_output(
+                operator.input_full_names,
+                attrs,
+                _build_labels_path,
+                n_out,
+                scope,
+                operator,
+                container,
+                op_version=2,
+                dtype=dtype)
+            n_out += 1
+        if getattr(operator, "decision_leaf", False):
+            # decision_leaf
+            _append_decision_output(
+                operator.input_full_names,
+                attrs,
+                _build_labels_leaf,
+                n_out,
+                scope,
+                operator,
+                container,
+                op_version=2,
+                cast_encode=True,
+                dtype=dtype)
     else:
         # Create tree regressor
         output_name = scope.get_unique_variable_name("output")

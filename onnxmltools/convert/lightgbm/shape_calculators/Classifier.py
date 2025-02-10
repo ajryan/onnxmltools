@@ -21,9 +21,14 @@ def calculate_lightgbm_classifier_output_shapes(operator):
         1. [N, C] ---> [N, 1], A sequence of map
 
     Note that the second case is not allowed as long as ZipMap only produces dictionary.
+
+    If decision path and/or decision leaf are requested (indexes 2 and 3), those output shapes are set.
     """
+    # pred, label, (optional) decision_path, (optional) decision_leaf
+    out_range = [2, 4]
+
     check_input_and_output_numbers(
-        operator, input_count_range=1, output_count_range=[1, 2]
+        operator, input_count_range=1, output_count_range=out_range
     )
     check_input_and_output_types(
         operator, good_input_types=[FloatTensorType, Int64TensorType]
@@ -44,7 +49,11 @@ def calculate_lightgbm_classifier_output_shapes(operator):
         operator.outputs[1].type = FloatTensorType()
     else:
         operator.outputs[1].type = FloatTensorType(shape=[N, 1])
-
+    
+    # set output shape for decision_path and decision_leaf
+    # both are sample, 1 since the decision_path encodes the path as a string sequence
+    for n in range(2, len(operator.outputs)):
+        operator.outputs[n].type.shape = [N, 1]
 
 def calculate_lgbm_zipmap(operator):
     check_input_and_output_numbers(operator, output_count_range=2)

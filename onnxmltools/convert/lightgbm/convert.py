@@ -24,6 +24,8 @@ def convert(
     without_onnx_ml=False,
     zipmap=True,
     split=None,
+    decision_path=False,
+    decision_leaf=False
 ):
     """
     This function produces an equivalent ONNX model of the given lightgbm model.
@@ -92,6 +94,8 @@ def convert(
         custom_shape_calculators,
         zipmap=zipmap,
         split=split,
+        decision_path=decision_path,
+        decision_leaf=decision_leaf
     )
     topology.compile()
     onnx_ml_model = convert_topology(
