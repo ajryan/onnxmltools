@@ -156,7 +156,7 @@ def _parse_lightgbm_simple_model(scope, model, inputs, split=None, decision_path
 def _parse_sklearn_classifier(scope, model, inputs, zipmap=True, decision_path=False, decision_leaf=False):
     probability_tensor = _parse_lightgbm_simple_model(scope, model, inputs, decision_path=decision_path, decision_leaf=decision_leaf)
     this_operator = scope.declare_local_operator("LgbmZipMap")
-    this_operator.inputs = probability_tensor
+    this_operator.inputs = probability_tensor[:2]
     this_operator.zipmap = zipmap
 
     classes = model.classes_
@@ -196,7 +196,7 @@ def _parse_sklearn_classifier(scope, model, inputs, zipmap=True, decision_path=F
         )
     this_operator.outputs.append(output_label)
     this_operator.outputs.append(output_probability)
-    return this_operator.outputs
+    return this_operator.outputs + probability_tensor[2:]
 
 
 def _parse_lightgbm(scope, model, inputs, zipmap=True, split=None, decision_path=False, decision_leaf=False):

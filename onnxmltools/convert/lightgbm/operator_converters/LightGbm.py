@@ -550,6 +550,7 @@ def _split_tree_ensemble_atts(attrs, split):
 
 def _append_decision_output(
         input_name,
+        gbm_text,
         attrs,
         fct_label,
         n_out,
@@ -593,12 +594,8 @@ def _append_decision_output(
             scope, dpath, final_name,
             container, to=onnx_proto.TensorProto.INT64,
             operator_name=scope.get_unique_operator_name('TreePathType'))
-    else:
-        effective_tree = overwrite_tree if overwrite_tree is not None else (
-            operator.original_operator.booster_.trees_to_dataframe()
-        )
-        
-        labels = fct_label(effective_tree)
+    else:        
+        labels = fct_label(gbm_text['tree_info'][299]['tree_structure']) # TODO need to do all trees
         ordered = list(sorted(labels.items()))
         keys = [float(_[0]) for _ in ordered]
         values = [_[1] for _ in ordered]
@@ -615,36 +612,41 @@ def _append_decision_output(
 
     return final_name
 
-def _recursive_build_labels(tree, index, current):
-    current[index] = True
-    if 'L' in tree.at[index, 'left_child']:
-        yield (index, current.copy())
+def _recursive_build_labels(tree_info, current):
+    if 'split_index' in tree_info:
+        current[tree_info['split_index']] = True
+
+    if 'leaf_index' in tree_info:
+        yield (tree_info['leaf_index'], current.copy())
     else:
         for it in _recursive_build_labels(
-                tree, int(tree.at[index, 'left_child'].split('-')[1].replace('L', '').replace('S', '')), current):
+                tree_info['left_child'], current):
             yield it
         for it in _recursive_build_labels(
-                tree, int(tree.at[index, 'right_child'].split('-')[1].replace('L', '').replace('S', '')), current):
+                tree_info['right_child'], current):
             yield it
-    current[index] = False
 
-def _build_labels_path(tree):
+    if 'split_index' in tree_info:
+        current[tree_info['split_index']] = False
+
+
+def _build_labels_path(tree_info):
     paths = {}
     current = {}
 
-    for leaf_idex, path in _recursive_build_labels(tree, 0, current):
-        spath = ["0" for _ in range(len(tree.index))]
+    for leaf_idex, path in _recursive_build_labels(tree_info, current):
+        spath = ["0" for _ in range(len(list(path.items())))]
         for nodeid, b in path.items():
             if b:
                 spath[nodeid] = "1"
         paths[leaf_idex] = ''.join(spath)
     return paths
 
-def _build_labels_leaf(tree):
+def _build_labels_leaf(tree_info):
     paths = {}
     current = {}
 
-    for leaf_idex, path in _recursive_build_labels(tree, 0, current):
+    for leaf_idex, path in _recursive_build_labels(tree_info, current):
         paths[leaf_idex] = leaf_idex
     return paths
 
@@ -906,6 +908,7 @@ def convert_lightgbm(scope, operator, container):
             # decision_path
             _append_decision_output(
                 operator.input_full_names,
+                gbm_text,
                 attrs,
                 _build_labels_path,
                 n_out,
@@ -919,6 +922,7 @@ def convert_lightgbm(scope, operator, container):
             # decision_leaf
             _append_decision_output(
                 operator.input_full_names,
+                gbm_text,
                 attrs,
                 _build_labels_leaf,
                 n_out,
