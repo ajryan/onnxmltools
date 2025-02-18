@@ -8,6 +8,7 @@ import json
 import numpy as np
 from onnx import TensorProto
 from ...common._apply_operation import (
+    apply_concat,
     apply_div,
     apply_reshape,
     apply_sub,
@@ -23,7 +24,9 @@ from ...common.data_types import (
     StringTensorType,
     DoubleTensorType
 )
-from ...common.tree_ensemble import get_default_tree_classifier_attribute_pairs
+from ...common.tree_ensemble import (
+    get_default_tree_classifier_attribute_pairs,
+    add_tree_to_attribute_pairs)
 from ....proto import onnx_proto
 try:
     from onnxconverter_common.data_types import (
@@ -551,17 +554,16 @@ def _split_tree_ensemble_atts(attrs, split):
 def _append_decision_output(
         input_name,
         gbm_text,
+        tree_id,
         attrs,
         fct_label,
-        n_out,
         scope,
         operator,
         container,
         op_version=2,
         cast_encode=False,
         regression=False,
-        dtype=np.float32,
-        overwrite_tree=None):
+        dtype=np.float32):
 
     attrs = attrs.copy()
     attrs['name'] = scope.get_unique_operator_name('TreeEnsembleClassifier')
@@ -584,18 +586,15 @@ def _append_decision_output(
         'TreeEnsembleRegressor', input_name, dpath,
         op_domain='ai.onnx.ml', op_version=op_version, **attrs)
 
-    if n_out is None:
-        final_name = scope.get_unique_variable_name("dpatho")
-    else:
-        final_name = operator.outputs[n_out].full_name
+    path_var_name = scope.get_unique_variable_name("dpatho")
 
     if cast_encode:
         apply_cast(
-            scope, dpath, final_name,
+            scope, dpath, path_var_name,
             container, to=onnx_proto.TensorProto.INT64,
             operator_name=scope.get_unique_operator_name('TreePathType'))
-    else:        
-        labels = fct_label(gbm_text['tree_info'][299]['tree_structure']) # TODO need to do all trees
+    else:
+        labels = fct_label(gbm_text['tree_info'][tree_id]['tree_structure'])
         ordered = list(sorted(labels.items()))
         keys = [float(_[0]) for _ in ordered]
         values = [_[1] for _ in ordered]
@@ -606,11 +605,11 @@ def _append_decision_output(
             default_string='0', keys_floats=keys, values_strings=values,
             name=scope.get_unique_operator_name('TreePath'))
         apply_reshape(
-            scope, name, final_name,
+            scope, name, path_var_name,
             container, desired_shape=(-1, 1),
             operator_name=scope.get_unique_operator_name('TreePathShape'))
 
-    return final_name
+    return path_var_name
 
 def _recursive_build_labels(tree_info, current):
     if 'split_index' in tree_info:
@@ -903,35 +902,84 @@ def convert_lightgbm(scope, operator, container):
         # (keys are labels while values are the associated probabilities)
         container.add_node("Identity", prob_tensor, operator.outputs[1].full_name)
 
+        tree_paths=[]
+        tree_leafs=[]
+        for i, tree in enumerate(gbm_text["tree_info"]):
+            attrs = get_default_tree_classifier_attribute_pairs()
+            attrs['name'] = scope.get_unique_operator_name(
+                "%s_%d" % ("TreeEnsembleClassifier", i))
+            attrs['n_targets'] = int(op.n_outputs_)
+            add_tree_to_attribute_pairs(
+                attrs, True, tree.tree_, 0, 1., 0, False,
+                True, dtype=dtype)
+            attrs['n_targets'] = 1
+            attrs['post_transform'] = 'NONE'
+            attrs['target_ids'] = [0 for _ in attrs['class_ids']]
+            attrs['target_weights'] = [
+                float(_) for _ in attrs['class_nodeids']]
+            attrs['target_nodeids'] = attrs['class_nodeids']
+            attrs['target_treeids'] = attrs['class_treeids']
+            rem = [k for k in attrs if k.startswith('class')]
+            for k in rem:
+                del attrs[k]
+            if dtype is not None:
+                for k in attrs:
+                    if k in ('nodes_values', 'class_weights',
+                             'target_weights', 'nodes_hitrates',
+                             'base_values'):
+                        attrs[k] = np.array(attrs[k], dtype=dtype)
+            dpath = scope.get_unique_variable_name("dpath%d" % i)
+            # add regressor for each tree
+            container.add_node(
+                "TreeEnsembleRegressor", operator.input_full_names, dpath,
+                op_domain="ai.onnx.ml", op_version=2, **attrs)
+            tree_id = i
+            if getattr(operator, "decision_path", False):
+                # decision_path
+                tree_paths.append(_append_decision_output(
+                    operator.input_full_names,
+                    gbm_text,
+                    tree_id,
+                    attrs,
+                    _build_labels_path,
+                    scope,
+                    operator,
+                    container,
+                    op_version=2,
+                    dtype=dtype))
+            if getattr(operator, "decision_leaf", False):
+                # decision_leaf
+                tree_leafs.append(_append_decision_output(
+                    operator.input_full_names,
+                    gbm_text,
+                    tree_id,
+                    attrs,
+                    _build_labels_leaf,
+                    scope,
+                    operator,
+                    container,
+                    op_version=2,
+                    cast_encode=True,
+                    dtype=dtype))
+
+         # merges everything
+
+        # merge all of the tree regressors via concat
         n_out = 2
         if getattr(operator, "decision_path", False):
-            # decision_path
-            _append_decision_output(
-                operator.input_full_names,
-                gbm_text,
-                attrs,
-                _build_labels_path,
-                n_out,
-                scope,
-                operator,
-                container,
-                op_version=2,
-                dtype=dtype)
+            apply_concat(
+                scope, tree_paths, operator.outputs[n_out].full_name,
+                container, axis=1,
+                operator_name=scope.get_unique_operator_name('concat'))
             n_out += 1
+
         if getattr(operator, "decision_leaf", False):
-            # decision_leaf
-            _append_decision_output(
-                operator.input_full_names,
-                gbm_text,
-                attrs,
-                _build_labels_leaf,
-                n_out,
-                scope,
-                operator,
-                container,
-                op_version=2,
-                cast_encode=True,
-                dtype=dtype)
+            # decision_path
+            apply_concat(
+                scope, tree_leaves, operator.outputs[n_out].full_name,
+                container, axis=1,
+                operator_name=scope.get_unique_operator_name('concat'))
+            n_out += 1
     else:
         # Create tree regressor
         output_name = scope.get_unique_variable_name("output")
