@@ -7,6 +7,8 @@ import ctypes
 import json
 import numpy as np
 from onnx import TensorProto
+from lightgbm import LGBMClassifier
+from pandas import DataFrame
 from ...common._apply_operation import (
     apply_concat,
     apply_div,
@@ -26,7 +28,8 @@ from ...common.data_types import (
 )
 from ...common.tree_ensemble import (
     get_default_tree_classifier_attribute_pairs,
-    add_tree_to_attribute_pairs)
+    add_tree_to_attribute_pairs,
+    add_node)
 from ....proto import onnx_proto
 try:
     from onnxconverter_common.data_types import (
@@ -293,6 +296,34 @@ def _parse_node(
         attrs["class_ids"].append(class_id)
         attrs["class_weights"].append(float(node["leaf_value"]) * learning_rate)
 
+def _add_tree_to_attribute_pairs(
+        attr_pairs: dict,
+        is_classifier: bool,
+        tree_dataframe: DataFrame,
+        tree_id: int,
+        tree_weight: float,
+        weight_id_bias: float,
+        leaf_weights_are_counts: bool):
+    for row in tree_dataframe[tree_dataframe["tree_index"] == tree_id].itertuples():
+        i = row.Index
+        node_id = i
+        weight = row.weight
+
+        if row.left_child is not None or row.right_child is not None:
+            mode = 'BRANCH_LEQ'
+            feat_id = row.split_feature
+            threshold = row.threshold
+            left_child_id = row.left_child
+            right_child_id = row.right_child
+        else:
+            mode = 'LEAF'
+            feat_id = 0
+            threshold = 0.
+            left_child_id = 0
+            right_child_id = 0
+
+        add_node(attr_pairs, is_classifier, tree_id, tree_weight, node_id, feat_id, mode, threshold,
+                 left_child_id, right_child_id, weight, weight_id_bias, leaf_weights_are_counts)
 
 def dump_booster_model(
     self, num_iteration=None, start_iteration=0, importance_type="split", verbose=0
@@ -729,8 +760,8 @@ def convert_lightgbm(scope, operator, container):
         )
 
     # Use the same algorithm to parse the tree
-    for i, tree in enumerate(gbm_text["tree_info"]):
-        tree_id = i
+    for tree_index, tree in enumerate(gbm_text["tree_info"]):
+        tree_id = tree_index
         class_id = tree_id % n_classes
         # tree['shrinkage'] --> LightGbm provides figures with it already.
         learning_rate = 1.0
@@ -745,14 +776,14 @@ def convert_lightgbm(scope, operator, container):
     node_numbers_per_tree = Counter(attrs["nodes_treeids"])
     tree_number = len(node_numbers_per_tree.keys())
     accumulated_node_numbers = [0] * tree_number
-    for i in range(1, tree_number):
-        accumulated_node_numbers[i] = (
-            accumulated_node_numbers[i - 1] + node_numbers_per_tree[i - 1]
+    for tree_index in range(1, tree_number):
+        accumulated_node_numbers[tree_index] = (
+            accumulated_node_numbers[tree_index - 1] + node_numbers_per_tree[tree_index - 1]
         )
     global_node_indexes = []
-    for i in range(len(attrs["nodes_nodeids"])):
-        tree_id = attrs["nodes_treeids"][i]
-        node_id = attrs["nodes_nodeids"][i]
+    for tree_index in range(len(attrs["nodes_nodeids"])):
+        tree_id = attrs["nodes_treeids"][tree_index]
+        node_id = attrs["nodes_nodeids"][tree_index]
         global_node_indexes.append(accumulated_node_numbers[tree_id] + node_id)
     for k, v in attrs.items():
         if k.startswith("nodes_"):
@@ -903,16 +934,21 @@ def convert_lightgbm(scope, operator, container):
         container.add_node("Identity", prob_tensor, operator.outputs[1].full_name)
 
         tree_paths=[]
-        tree_leafs=[]
-        # for i, tree in enumerate(gbm_text["tree_info"]):
-        for i, tree in enumerate(operator.raw_operator.estimators_):
+        tree_leaves=[]
+        trees_dataframe: DataFrame = operator.raw_operator.booster_.trees_to_dataframe()
+        for tree_index in range(operator.raw_operator.n_estimators):
             attrs = get_default_tree_classifier_attribute_pairs()
             attrs['name'] = scope.get_unique_operator_name(
-                "%s_%d" % ("TreeEnsembleClassifier", i))
+                "%s_%d" % ("TreeEnsembleClassifier", tree_index))
             attrs['n_targets'] = int(n_classes)
-            add_tree_to_attribute_pairs(
-                attrs, True, tree.tree_, 0, 1., 0, False,
-                True, dtype=dtype)
+            _add_tree_to_attribute_pairs(
+                attrs,
+                True,
+                trees_dataframe,
+                0,
+                1.,
+                0,
+                False)
             attrs['n_targets'] = 1
             attrs['post_transform'] = 'NONE'
             attrs['target_ids'] = [0 for _ in attrs['class_ids']]
@@ -929,12 +965,12 @@ def convert_lightgbm(scope, operator, container):
                              'target_weights', 'nodes_hitrates',
                              'base_values'):
                         attrs[k] = np.array(attrs[k], dtype=dtype)
-            dpath = scope.get_unique_variable_name("dpath%d" % i)
+            dpath = scope.get_unique_variable_name("dpath%d" % tree_index)
             # add regressor for each tree
             container.add_node(
                 "TreeEnsembleRegressor", operator.input_full_names, dpath,
                 op_domain="ai.onnx.ml", op_version=2, **attrs)
-            tree_id = i
+            tree_id = tree_index
             if getattr(operator, "decision_path", False):
                 # decision_path
                 tree_paths.append(_append_decision_output(
@@ -950,7 +986,7 @@ def convert_lightgbm(scope, operator, container):
                     dtype=dtype))
             if getattr(operator, "decision_leaf", False):
                 # decision_leaf
-                tree_leafs.append(_append_decision_output(
+                tree_leaves.append(_append_decision_output(
                     operator.input_full_names,
                     gbm_text,
                     tree_id,
@@ -1017,8 +1053,8 @@ def convert_lightgbm(scope, operator, container):
         else:
             tree_attrs = _split_tree_ensemble_atts(attrs, split)
             tree_nodes = []
-            for i, ats in enumerate(tree_attrs):
-                tree_name = scope.get_unique_variable_name("tree%d" % i)
+            for tree_index, ats in enumerate(tree_attrs):
+                tree_name = scope.get_unique_variable_name("tree%d" % tree_index)
                 container.add_node(
                     "TreeEnsembleRegressor",
                     operator.input_full_names,
@@ -1026,13 +1062,13 @@ def convert_lightgbm(scope, operator, container):
                     op_domain="ai.onnx.ml",
                     **ats
                 )
-                cast_name = scope.get_unique_variable_name("dtree%d" % i)
+                cast_name = scope.get_unique_variable_name("dtree%d" % tree_index)
                 container.add_node(
                     "Cast",
                     tree_name,
                     cast_name,
                     to=TensorProto.DOUBLE,  # pylint: disable=E1101
-                    name=scope.get_unique_operator_name("dtree%d" % i),
+                    name=scope.get_unique_operator_name("dtree%d" % tree_index),
                 )
                 tree_nodes.append(cast_name)
             cast_name = scope.get_unique_variable_name("ftrees")
@@ -1047,7 +1083,7 @@ def convert_lightgbm(scope, operator, container):
                 cast_name,
                 output_name,
                 to=TensorProto.FLOAT,  # pylint: disable=E1101
-                name=scope.get_unique_operator_name("dtree%d" % i),
+                name=scope.get_unique_operator_name("dtree%d" % tree_index),
             )
         if gbm_model.boosting_type == "rf":
             denominator_name = scope.get_unique_variable_name("denominator")

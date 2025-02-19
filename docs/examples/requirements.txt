@@ -1,2 +1,6 @@
 lightgbm
+numpy
+onnxruntime
+pandas
 pydot
+scikit-learn
