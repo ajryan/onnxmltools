@@ -904,11 +904,12 @@ def convert_lightgbm(scope, operator, container):
 
         tree_paths=[]
         tree_leafs=[]
-        for i, tree in enumerate(gbm_text["tree_info"]):
+        # for i, tree in enumerate(gbm_text["tree_info"]):
+        for i, tree in enumerate(operator.raw_operator.estimators_):
             attrs = get_default_tree_classifier_attribute_pairs()
             attrs['name'] = scope.get_unique_operator_name(
                 "%s_%d" % ("TreeEnsembleClassifier", i))
-            attrs['n_targets'] = int(op.n_outputs_)
+            attrs['n_targets'] = int(n_classes)
             add_tree_to_attribute_pairs(
                 attrs, True, tree.tree_, 0, 1., 0, False,
                 True, dtype=dtype)
