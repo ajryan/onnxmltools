@@ -48,7 +48,7 @@ native_pred=clr.predict(X_test, pred_leaf=True, pred_contrib=True)
 # +++++++++++++++++++++++++
 
 initial_type = [("float_input", FloatTensorType([None, 4]))]
-onx = convert_lightgbm(clr, initial_types=initial_type, decision_path=True, decision_leaf=True)
+onx = convert_lightgbm(clr, initial_types=initial_type, decision_path=True)
 
 ###################################
 # Compute the predictions with onnxruntime
