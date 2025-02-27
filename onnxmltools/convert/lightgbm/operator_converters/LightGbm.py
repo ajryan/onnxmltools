@@ -78,7 +78,7 @@ def _create_node_id(node_id_pool):
     return i
 
 
-def _parse_tree_structure(tree_id, class_id, learning_rate, tree_structure, attrs):
+def _parse_tree_structure(tree_id, class_id, learning_rate, tree_structure, attrs, path_info=None):
     """
     The pool of all nodes' indexes created when parsing a single tree.
     Different tree use different pools.
@@ -88,6 +88,36 @@ def _parse_tree_structure(tree_id, class_id, learning_rate, tree_structure, attr
 
     node_id = _create_node_id(node_id_pool)
     node_pyid_pool[id(tree_structure)] = node_id
+    
+    # Initialize current path with root node
+    
+    if path_info is None:
+        path_info = {}
+    # if tree_id not in path_info:
+    #     path_info[tree_id] = {}
+
+    # # gets populated for both internal and leaf    
+    # path_info[tree_id]['path_nodeids'] = {}
+    # path_info[tree_id]['path_binary'] = {}
+    
+    # # gets populated for internal only
+    # path_info[tree_id]['path_split_index'] = {}
+    # path_info[tree_id]['path_split_feature'] = {}
+    # path_info[tree_id]['path_split_gain'] = {}
+    # path_info[tree_id]['path_threshold'] = {}
+    # path_info[tree_id]['path_decision_type'] = {}
+    # path_info[tree_id]['path_missing_type'] = {}
+    # path_info[tree_id]['path_internal_value'] = {}
+    # path_info[tree_id]['path_internal_weight'] = {}
+
+    # # get populated for leaf only
+    # path_info[tree_id]['path_leaf_index'] = {}
+    # path_info[tree_id]['path_leaf_value'] = {}
+    # path_info[tree_id]['path_leaf_weight'] = {}
+    # path_info[tree_id]['path_leaf_count'] = {}
+
+
+    
 
     # The root node is a leaf node.
     if "left_child" not in tree_structure or "right_child" not in tree_structure:
@@ -100,6 +130,8 @@ def _parse_tree_structure(tree_id, class_id, learning_rate, tree_structure, attr
             learning_rate,
             tree_structure,
             attrs,
+            current_path=None,
+            path_info=None
         )
         return
 
@@ -159,7 +191,36 @@ def _parse_tree_structure(tree_id, class_id, learning_rate, tree_structure, attr
     else:
         attrs["nodes_missing_value_tracks_true"].append(0)
     attrs["nodes_hitrates"].append(1.0)
+
+    # populated root values in dictionary with the same keys as for tree_info
+
+    current_path = {}
+    current_path['path_nodeids'] = [node_id]
+    current_path['path_binary'] = [0]
+
+    # gets populated for internal only
+    current_path['path_split_index'] = [tree_structure['split_index']]
+    current_path['path_split_feature'] = [tree_structure['split_feature']]
+    current_path['path_split_gain'] = [tree_structure['split_gain']]
+    current_path['path_threshold'] = [tree_structure['threshold']]
+    current_path['path_decision_type'] = [tree_structure['decision_type']]
+    current_path['path_missing_type'] = [tree_structure['missing_type']]
+    current_path['path_internal_value'] = [tree_structure['internal_value']]
+    current_path['path_internal_weight'] = [tree_structure['internal_count']]
+    # get populated for leaf only
+
+    current_path['path_leaf_index'] = []
+    current_path['path_leaf_value'] = []
+    current_path['path_leaf_weight'] = []
+    current_path['path_leaf_count'] = []
+
+
+
     if left_parse:
+        #left_path = current_path + [left_id]
+        current_path['path_nodeids'].append(left_id)
+        current_path['path_binary'].append(1)
+
         _parse_node(
             tree_id,
             class_id,
@@ -169,8 +230,17 @@ def _parse_tree_structure(tree_id, class_id, learning_rate, tree_structure, attr
             learning_rate,
             tree_structure["left_child"],
             attrs,
+            current_path,
+            path_info
         )
+
+        for k in current_path.keys():
+                current_path[k].pop()
+
     if right_parse:
+        current_path['path_nodeids'].append(right_id)
+        current_path['path_binary'].append(0)
+
         _parse_node(
             tree_id,
             class_id,
@@ -180,15 +250,38 @@ def _parse_tree_structure(tree_id, class_id, learning_rate, tree_structure, attr
             learning_rate,
             tree_structure["right_child"],
             attrs,
+            current_path, 
+            path_info
         )
+
+        for k in current_path.keys():
+                if len(current_path[k]) > 0:
+                    current_path[k].pop()
 
 
 def _parse_node(
-    tree_id, class_id, node_id, node_id_pool, node_pyid_pool, learning_rate, node, attrs
+    tree_id, class_id, node_id, node_id_pool, node_pyid_pool, learning_rate, node, attrs, current_path=None, path_info=None
 ):
     """
     Parses nodes.
     """
+    tree_structure = node
+    
+
+    # if the node does not contain 'leaf*'
+
+    if 'leaf_index' not in tree_structure:
+    # gets populated for internal only
+        current_path['path_split_index'].append(tree_structure['split_index'])
+        current_path['path_split_feature'].append(tree_structure['split_feature'])
+        current_path['path_split_gain'].append(tree_structure['split_gain'])
+        current_path['path_threshold'].append(tree_structure['threshold'])
+        current_path['path_decision_type'].append(tree_structure['decision_type'])
+        current_path['path_missing_type'].append(tree_structure['missing_type'])
+        current_path['path_internal_value'].append(tree_structure['internal_value'])
+        current_path['path_internal_weight'].append(tree_structure['internal_count'])
+        
+        
     if (hasattr(node, "left_child") and hasattr(node, "right_child")) or (
         "left_child" in node and "right_child" in node
     ):
@@ -247,6 +340,9 @@ def _parse_node(
 
         # Recursively dive into the child nodes
         if left_parse:
+            current_path['path_nodeids'].append(left_id)
+            current_path['path_binary'].append(1)
+
             _parse_node(
                 tree_id,
                 class_id,
@@ -256,8 +352,17 @@ def _parse_node(
                 learning_rate,
                 node["left_child"],
                 attrs,
+                current_path,
+                path_info
             )
+
+            for k in current_path.keys():
+                current_path[k].pop()
+
         if right_parse:
+            current_path['path_nodeids'].append(right_id)
+            current_path['path_binary'].append(0)
+
             _parse_node(
                 tree_id,
                 class_id,
@@ -267,10 +372,27 @@ def _parse_node(
                 learning_rate,
                 node["right_child"],
                 attrs,
+                current_path,
+                path_info
             )
+
+            for k in current_path.keys():
+                if len(current_path[k]) > 0:
+                    current_path[k].pop()
+            
     elif hasattr(node, "left_child") or hasattr(node, "right_child"):
         raise ValueError("Need two branches")
     else:
+
+
+        # get populated for leaf only
+
+        current_path['path_leaf_index'].append(tree_structure["leaf_index"])
+        current_path['path_leaf_value'].append(tree_structure["leaf_value"])
+        current_path['path_leaf_weight'].append(tree_structure["leaf_weight"])
+        current_path['path_leaf_count'].append(tree_structure["leaf_count"])
+
+
         # Node attributes
         attrs["nodes_treeids"].append(tree_id)
         attrs["nodes_nodeids"].append(node_id)
@@ -295,35 +417,35 @@ def _parse_node(
         attrs["class_nodeids"].append(node_id)
         attrs["class_ids"].append(class_id)
         attrs["class_weights"].append(float(node["leaf_value"]) * learning_rate)
+        
+        # Store the path to this leaf node
+        # Use a tuple of (tree_id, node_id) as the key for uniqueness
+        path_info[(tree_id,node_id)] = {}
+        
+        path_info[(tree_id,node_id)]['path_binary'] = list(current_path['path_binary'])
+        path_info[(tree_id,node_id)]['path_nodeids'] = list(current_path['path_nodeids'])
+        path_info[(tree_id,node_id)]['path_split_index'] = list(current_path['path_split_index'])
+        path_info[(tree_id,node_id)]['path_split_feature'] = list(current_path['path_split_feature'])
+        path_info[(tree_id,node_id)]['path_split_gain'] = list(current_path['path_split_gain'])
+        path_info[(tree_id,node_id)]['path_threshold'] = list(current_path['path_threshold'])
+        path_info[(tree_id,node_id)]['path_decision_type'] = list(current_path['path_decision_type'])
+        path_info[(tree_id,node_id)]['path_missing_type'] = list(current_path['path_missing_type'])
+        path_info[(tree_id,node_id)]['path_internal_value'] = list(current_path['path_internal_value'])
+        path_info[(tree_id,node_id)]['path_internal_weight'] = list(current_path['path_internal_weight'])
+        path_info[(tree_id,node_id)]['path_leaf_index'] = list(current_path['path_leaf_index'])
+        path_info[(tree_id,node_id)]['path_leaf_value'] = list(current_path['path_leaf_value'])
+        path_info[(tree_id,node_id)]['path_leaf_weight'] = list(current_path['path_leaf_weight'])
+        path_info[(tree_id,node_id)]['path_leaf_count'] = list(current_path['path_leaf_count'])
 
-def _add_tree_to_attribute_pairs(
-        attr_pairs: dict,
-        is_classifier: bool,
-        tree_dataframe: DataFrame,
-        tree_id: int,
-        tree_weight: float,
-        weight_id_bias: float,
-        leaf_weights_are_counts: bool):
-    for row in tree_dataframe[tree_dataframe["tree_index"] == tree_id].itertuples():
-        i = row.Index
-        node_id = i
-        weight = row.weight
 
-        if row.left_child is not None or row.right_child is not None:
-            mode = 'BRANCH_LEQ'
-            feat_id = row.split_feature
-            threshold = row.threshold
-            left_child_id = row.left_child
-            right_child_id = row.right_child
-        else:
-            mode = 'LEAF'
-            feat_id = 0
-            threshold = 0.
-            left_child_id = 0
-            right_child_id = 0
 
-        add_node(attr_pairs, is_classifier, tree_id, tree_weight, node_id, feat_id, mode, threshold,
-                 left_child_id, right_child_id, weight, weight_id_bias, leaf_weights_are_counts)
+    
+
+
+
+
+
+
 
 def dump_booster_model(
     self, num_iteration=None, start_iteration=0, importance_type="split", verbose=0
@@ -584,21 +706,60 @@ def _split_tree_ensemble_atts(attrs, split):
 
 
 def _append_decision_output(
-    input_name,
-    attrs,
-    fct_label,
-    n_out,
+    input_name: str,
+    attrs: dict,
+    fct_label: callable,
+    n_out: int,
     scope,
     operator,
     container,
-    op_type="TreeEnsembleClassifier",
-    op_domain="ai.onnx.ml",
-    op_version=1,
-    cast_encode=False,
-    regression=False,
-    dtype=np.float32,
-    overwrite_tree=None,
-):
+    op_type: str = "TreeEnsembleClassifier",
+    op_domain: str = "ai.onnx.ml",
+    op_version: int = 1,
+    cast_encode: bool = False,
+    regression: bool = False,
+    dtype = np.float32,
+    overwrite_tree = None,
+) -> str:
+    """
+    Appends a decision output (path or leaf) to the model.
+    
+    Parameters
+    ----------
+    input_name : str
+        Input tensor name
+    attrs : dict
+        Attributes for the tree ensemble operator
+    fct_label : callable
+        Function that builds labels for paths or leaves
+    n_out : Optional[int]
+        Index of the output to use, or None to create a new output name
+    scope : Scope
+        Scope object for creating unique names
+    operator : Operator
+        Operator instance with information about the model
+    container : ModelComponentContainer
+        Container to add nodes to
+    op_type : str, default="TreeEnsembleClassifier"
+        Type of the operator to create
+    op_domain : str, default="ai.onnx.ml"
+        Domain of the operator
+    op_version : int, default=1
+        Version of the operator
+    cast_encode : bool, default=False
+        Whether to cast the output to INT64
+    regression : bool, default=False
+        Whether this is a regression model
+    dtype : numpy.dtype, default=numpy.float32
+        Data type for numeric values
+    overwrite_tree : Any, default=None
+        Tree structure to use instead of operator's tree
+        
+    Returns
+    -------
+    str
+        Name of the created output tensor
+    """
     attrs = attrs.copy()
     attrs["name"] = scope.get_unique_operator_name(op_type)
     attrs["n_targets"] = 1
@@ -638,7 +799,7 @@ def _append_decision_output(
             final_name,
             container,
             to=onnx_proto.TensorProto.INT64,
-            operator_name=scope.get_unique_operator_name("TreePathType"),
+            operator_name=scope.get_unique_operator_name("TreeLeaf"),
         )
     else:
         op = operator.raw_operator
@@ -676,6 +837,7 @@ def _recursive_build_labels(tree_info, current):
 
     if 'leaf_index' in tree_info:
         yield (tree_info['leaf_index'], current.copy())
+    
     else:
         for it in _recursive_build_labels(
                 tree_info['left_child'], current):
@@ -754,6 +916,9 @@ def guess_numpy_type(data_type):
     raise NotImplementedError("Unsupported data_type '{}'.".format(data_type))
 
 def convert_lightgbm(scope, operator, container):
+
+
+    print("Akhil ..........")
     """
     Converters for *lightgbm*.
     """
@@ -833,26 +998,40 @@ def convert_lightgbm(scope, operator, container):
         #   op_type="TreeEnsembleClassifier",
         #   op_domain="ai.onnx.ml",
         #   op_version=1,
+        if getattr(operator, "decision_path", False):
+            path = _append_decision_output(
+                input_name,
+                attr_path,
+                _build_labels_path,
+                None,
+                scope,
+                operator,
+                container,
+                op_type="TreeEnsembleClassifier",
+                op_domain="ai.onnx.ml",
+                op_version=1,
+                regression=False,
+                overwrite_tree=tree["tree_structure"],
+            )
+            tree_paths.append(path)
 
-        path = _append_decision_output(
-            input_name,
-            attr_path,
-            _build_labels_path,
-            None,
-            scope,
-            operator,
-            container,
-            op_type="TreeEnsembleClassifier",
-            op_domain="ai.onnx.ml",
-            op_version=1,
-            regression=False,
-            overwrite_tree=tree["tree_structure"],
-        )
-
-        tree_paths.append(path)
-                
-
-        
+        if getattr(operator, "decision_leaf", False):
+            leaves = _append_decision_output(
+                input_name,
+                attr_path,
+                _build_labels_leaf,
+                None,
+                scope,
+                operator,
+                container,
+                op_type="TreeEnsembleClassifier",
+                op_domain="ai.onnx.ml",
+                op_version=1,
+                regression=False,
+                cast_encode=True,
+                overwrite_tree=tree["tree_structure"],
+            )
+            tree_leaves.append(leaves)
 
     # Sort nodes_* attributes. For one tree, its node indexes
     # should appear in an ascent order in nodes_nodeids. Nodes
@@ -1095,13 +1274,13 @@ def convert_lightgbm(scope, operator, container):
                 operator_name=scope.get_unique_operator_name('concat'))
             n_out += 1
 
-        # if getattr(operator, "decision_leaf", False):
-        #     # decision_path
-        #     apply_concat(
-        #         scope, tree_leaves, operator.outputs[n_out].full_name,
-        #         container, axis=1,
-        #         operator_name=scope.get_unique_operator_name('concat'))
-        #     n_out += 1
+        if getattr(operator, "decision_leaf", False):
+            # decision_path
+            apply_concat(
+                scope, tree_leaves, operator.outputs[n_out].full_name,
+                container, axis=1,
+                operator_name=scope.get_unique_operator_name('concat'))
+            n_out += 1
     else:
         # Create tree regressor
         output_name = scope.get_unique_variable_name("output")
